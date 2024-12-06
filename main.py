@@ -7,7 +7,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from config import system_prompt, chat_title_blacklist, gpt_model
+from config import SYSTEM_PROMPT, CHAT_NAME_FILTER, CHAT_TITLE_BLACKLIST, GPT_MODEL
 from datetime import datetime, timedelta
 import aiosqlite
 
@@ -115,7 +115,7 @@ class MessageMonitor:
             if group_chat:
                 chat_from = event.chat if event.chat else (await event.get_chat())
                 chat_title = chat_from.title
-                if re.search(r'absinthe', chat_title, re.IGNORECASE) and chat_title not in chat_title_blacklist:
+                if re.search(CHAT_NAME_FILTER, chat_title, re.IGNORECASE) and chat_title not in CHAT_TITLE_BLACKLIST:
                     messages = []
                     # get the last 5 messages in the chat for context
                     async for msg in self.client.iter_messages(chat_from, limit=2):
@@ -160,7 +160,7 @@ class MessageMonitor:
             # Get your user ID first
             me = await self.client.get_me()
             
-            messages = [{"role": "system", "content": system_prompt}]
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             
             for msg in message_contexts:
                 sender, content = msg.split(": ", 1)
@@ -168,7 +168,7 @@ class MessageMonitor:
                 messages.append({"role": role, "content": content})
 
             response = await self.openai_client.chat.completions.create(
-                model=gpt_model,
+                model=GPT_MODEL,
                 messages=messages
             )
             

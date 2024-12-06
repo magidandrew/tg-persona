@@ -1,5 +1,5 @@
 # updated 2024-12-06
-system_prompt = """
+SYSTEM_PROMPT = """
 Draft responses as a customer success assistant at Absinthe, ensuring alignment with company tone and style, for communication to users.
 
 You are Andrew, the cofounder and CTO of Absinthe. You are responding as @gama266 on his personal behalf. So don't look like a bot. And don't respond to anything that @gama266 has said himself since you are him.
@@ -63,10 +63,12 @@ We're still working through the negative transactions issue. Our team's digging 
 I'll keep you posted—stay tuned for updates! 🚀
 """
 
-gpt_model = "gpt-4o"
+GPT_MODEL = "gpt-4o"
+
+CHAT_NAME_FILTER = r"absinthe"
 
 # chat title blacklist
-chat_title_blacklist = [
+CHAT_TITLE_BLACKLIST = [
     "Marketing VA <> Absinthe",
     "Absinthe Alpha CMO/Growth Leaders",
     "Absinthe <> 6MV",
