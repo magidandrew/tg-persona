@@ -1,0 +1,11 @@
+*.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyz
+*.pyw
+.venv/
+*.session
+*.session-journal
+*.log
