@@ -7,7 +7,7 @@ import logging
 import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from config import SYSTEM_PROMPT, CHAT_NAME_FILTER, CHAT_TITLE_BLACKLIST, GPT_MODEL
+from config import SYSTEM_PROMPT, CHAT_NAME_FILTER, CHAT_TITLE_BLACKLIST, GPT_MODEL, GPT_JSON_SCHEMA
 from datetime import datetime, timedelta
 import aiosqlite
 
@@ -116,6 +116,13 @@ class MessageMonitor:
                 chat_from = event.chat if event.chat else (await event.get_chat())
                 chat_title = chat_from.title
                 if re.search(CHAT_NAME_FILTER, chat_title, re.IGNORECASE) and chat_title not in CHAT_TITLE_BLACKLIST:
+                    # Get the last message sender before processing
+                    async for msg in self.client.iter_messages(chat_from, limit=1):
+                        sender = await msg.get_sender()
+                        if sender and sender.username == self.tg_username:
+                            self.logger.info("Last message was sent by me, ignoring...")
+                            return
+
                     messages = []
                     # get the last 5 messages in the chat for context
                     async for msg in self.client.iter_messages(chat_from, limit=2):
@@ -125,6 +132,7 @@ class MessageMonitor:
                         timestamp = msg.date.strftime("%Y-%m-%d %H:%M:%S")
                         messages.insert(0, f"{username} [{timestamp}]: {msg.text}")
                         self.logger.info(f"{username} [{timestamp}]: {msg.text}")
+                    
                     gpt_response = await self._call_gpt(messages, chat_from.id)
                     self.logger.info(f"GPT response: {gpt_response}")
 
@@ -167,8 +175,10 @@ class MessageMonitor:
                 role = "assistant" if sender == self.tg_username else "user"
                 messages.append({"role": role, "content": content})
 
-            response = await self.openai_client.chat.completions.create(
+            # call openai api
+            response = await self.openai_client.beta.chat.completions.parse(
                 model=GPT_MODEL,
+                response_format=GPT_JSON_SCHEMA,
                 messages=messages
             )
             
