@@ -1,6 +1,6 @@
 from telethon import TelegramClient, events, Button
 from telethon.types import Message
-from typing import Dict, List, Pattern
+from typing import Dict, List, Pattern, Tuple
 import re
 import asyncio
 import logging
@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from config import SYSTEM_PROMPT, CHAT_NAME_FILTER, CHAT_TITLE_BLACKLIST, GPT_MODEL, GPT_JSON_SCHEMA
 from datetime import datetime, timedelta
 import aiosqlite
+import json
 
 load_dotenv()
 
@@ -47,6 +48,9 @@ class MessageMonitor:
     def __init__(self, api_id: str,  api_hash: str, phone: str, bot_token: str, openai_api_key: str):
         self.client = TelegramClient('user_session', api_id, api_hash)
         self.bot = TelegramClient('bot_session', api_id, api_hash)
+        self.delay_time_seconds = 2  # todo: change this to 3 minutes
+        self.delay_check_interval_seconds = 1 # todo: change this to 15 seconds
+        self.max_unique_senders = 2
         self.bot_token = bot_token
         self.phone = phone
         self.patterns: Dict[Pattern, callable] = {}
@@ -64,6 +68,10 @@ class MessageMonitor:
         }
         self._schedule_daily_stats_reset()
         asyncio.create_task(self._init_db())
+        self.last_message_times = {}  # Store last message time for each chat
+        self.message_queues = {}      # Store queued messages for each chat
+        self.processing_tasks = {}    # Store processing tasks for each chat
+        self.delay_tasks = {}  # Store the delay tasks for each chat
 
     async def start(self):
         """Start the client and message monitoring"""
@@ -115,6 +123,8 @@ class MessageMonitor:
             if group_chat:
                 chat_from = event.chat if event.chat else (await event.get_chat())
                 chat_title = chat_from.title
+                chat_id = chat_from.id
+
                 if re.search(CHAT_NAME_FILTER, chat_title, re.IGNORECASE) and chat_title not in CHAT_TITLE_BLACKLIST:
                     # Get the last message sender before processing
                     async for msg in self.client.iter_messages(chat_from, limit=1):
@@ -123,21 +133,28 @@ class MessageMonitor:
                             self.logger.info("Last message was sent by me, ignoring...")
                             return
 
-                    messages = []
-                    # get the last 5 messages in the chat for context
-                    async for msg in self.client.iter_messages(chat_from, limit=2):
-                        sender = await msg.get_sender()
-                        sender_name = sender.first_name if sender else "Unknown"
-                        username = f"@{sender.username}" if sender and sender.username else "no_username"
-                        timestamp = msg.date.strftime("%Y-%m-%d %H:%M:%S")
-                        messages.insert(0, f"{username} [{timestamp}]: {msg.text}")
-                        self.logger.info(f"{username} [{timestamp}]: {msg.text}")
-                    
-                    gpt_response = await self._call_gpt(messages, chat_from.id)
-                    self.logger.info(f"GPT response: {gpt_response}")
+                    # Update last message time
+                    current_time = datetime.now()
+                    self.last_message_times[chat_id] = current_time
 
-                    self.stats['absinthe_group_messages'] += 1
-                    self.logger.info(f"Absinthe group chat: {chat_title}")
+                    # Initialize message queue if needed
+                    if chat_id not in self.message_queues:
+                        self.message_queues[chat_id] = []
+
+                    # Add message to queue
+                    self.message_queues[chat_id].append({
+                        'text': event.message.text,
+                        'sender': await event.get_sender(),
+                        'timestamp': current_time,
+                        'chat': chat_from
+                    })
+
+                    if chat_id in self.delay_tasks:
+                        # Cancel existing delay task
+                        self.delay_tasks[chat_id].cancel()
+
+                    # Create new delay task
+                    self.delay_tasks[chat_id] = asyncio.create_task(self._delayed_processing(chat_id))
             else:
                 self.stats['private_chats'] += 1
                 self.logger.info(f"Private chat with: {event.sender_id}")
@@ -145,7 +162,7 @@ class MessageMonitor:
             for pattern, callback in self.patterns.items():
                 if re.search(pattern, message_text):
                     await callback(event)
-                    
+            
     async def _check_mentions(self, event: events.NewMessage.Event) -> bool:
         """Check if the user was mentioned in the message"""
         if not self.tg_username:
@@ -162,7 +179,7 @@ class MessageMonitor:
             
         return False
     
-    async def _call_gpt(self, message_contexts: list[str], original_chat_id: int) -> str:
+    async def _call_gpt(self, message_contexts: list[str], original_chat_id: int) -> Tuple[str, bool]:
         """Call the GPT API with the message and send to bot for approval"""
         try:
             # Get your user ID first
@@ -182,10 +199,16 @@ class MessageMonitor:
                 messages=messages
             )
             
-            gpt_response = response.choices[0].message.content
+            raw_gpt_response = response.choices[0].message.content
+            decoded_gpt_response = json.loads(raw_gpt_response)
+            gpt_response = decoded_gpt_response['response']
+            should_respond = True if decoded_gpt_response['should_respond'] == 'true' else False
+        
+            if not should_respond:
+                self.logger.info(f"Skipping response for {original_chat_id} because: {decoded_gpt_response['reason']}")
             
             # Only proceed if we're sending to the bot owner
-            if me and me.id:
+            if me and me.id and should_respond: 
                 # Generate a unique ID for this message
                 message_id = f"{original_chat_id}_{len(self.pending_messages)}"
                 
@@ -213,7 +236,7 @@ class MessageMonitor:
                 
                 await self.bot.send_message(me.id, message, buttons=buttons)
             
-            return gpt_response
+            return gpt_response, should_respond
         except Exception as e:
             self.logger.error(f"Error in _call_gpt: {str(e)}")
             return f"Error generating response: {str(e)}"
@@ -329,6 +352,63 @@ class MessageMonitor:
         except Exception as e:
             self.logger.error(f"Error in button handler: {str(e)}")
             await event.answer("An error occurred while processing your request", alert=True)
+
+    async def _delayed_processing(self, chat_id: int):
+        """Handle the delayed processing with reset capability"""
+        try:
+            while True:
+                current_time = datetime.now()
+                last_message_time = self.last_message_times.get(chat_id)
+                
+                if not last_message_time:
+                    return
+                    
+                time_since_last = (current_time - last_message_time).total_seconds()
+                
+                if time_since_last >= self.delay_time_seconds:
+                    if chat_id in self.message_queues and self.message_queues[chat_id]:
+                        chat = self.message_queues[chat_id][0]['chat']
+                        formatted_messages = []
+                        unique_senders = []  # Changed from set to list
+                        
+                        # Fetch last 50 messages to get better context
+                        async for message in self.client.iter_messages(chat, limit=50):
+                            if message.sender and message.text:  # Only process text messages with senders
+                                sender_username = message.sender.username if message.sender.username else str(message.sender.id)
+                                
+                                # Add sender if they're different from the last sender
+                                if not unique_senders or sender_username != unique_senders[-1]:
+                                    unique_senders.append(sender_username)
+                                
+                                # Include message if we haven't exceeded max unique senders
+                                if len(unique_senders) <= self.max_unique_senders:
+                                    timestamp = message.date.strftime("%Y-%m-%d %H:%M:%S")
+                                    username = f"@{message.sender.username}" if message.sender.username else "no_username"
+                                    formatted_messages.insert(0, f"{username} [{timestamp}]: {message.text}")
+                                else:
+                                    break
+
+                        if formatted_messages:
+                            self.logger.info(f"Formatted messages: {formatted_messages}")
+                            gpt_response, should_respond = await self._call_gpt(formatted_messages, chat_id)
+                            if should_respond:
+                                self.logger.info(f"GPT response: {gpt_response}")
+
+                        # Clear the queue after processing
+                        self.message_queues[chat_id] = []
+                        
+                        # Clean up
+                        if chat_id in self.delay_tasks:
+                            del self.delay_tasks[chat_id]
+                        return
+                    
+                await asyncio.sleep(self.delay_check_interval_seconds)
+
+        except asyncio.CancelledError:
+            self.logger.info(f"Delayed processing cancelled for chat {chat_id}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Error in delayed processing: {str(e)}")
 
 async def main():
     monitor = MessageMonitor(

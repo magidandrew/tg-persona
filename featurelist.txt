@@ -3,21 +3,22 @@ should haves:
     - manually override this behavior if I am explicitly tagged in the message above. must always respond if tagged - ✅
     - also if it has something to do with marketing, sales, etc - ✅
 - I am @gama266 so i should never refer to myself or think of myself as another person/resource - ✅
-- wait for 3 min since last message since they might follow up with additional messages (sometimes up to 6-8)
-    - return more context as back 2-3 people (rather than 2-3 messages)
+- wait for 3 min since last message since they might follow up with additional messages (sometimes up to 6-8) - ✅
+    - return more context as back 2-3 people (rather than 2-3 messages) - ✅
     - keep waiting to respond until there are people typing (only respond when the chat cools off for 1 min)
-- message presets - (buy time), (not sure and defer responsibility to someone else)
-    - buy ⏰ (we're looking into this!), defer (hey I'll have to talk to engineering about this), escalation (super valid - let me escalate to our engineering team)
-- give reactions to messages when appropriate (instead of replying with a message) - choices: thumbs up, fire, amen
 - ability to mute all groups automatically (a job that runs every 30 min and mutes all for 30 min). this way when you stop running the bot, it unmutes. (how to do batch processing, just mute until needed)
     - [you have 3 urgent, 2 medium, 1 low] messages
 - batch processing system - groups messages by priority and allows me to screen them there and then
     - does it in the morning
     - does it in the evening
     - for now, set it as config settings
-- edit option sometimes doesn't work
 - can respond automatically with a msg like: "hey im stuck in a call, i'll be looking into this my end of day!"
     - unless its "urgent"
+
+- message presets - (buy time), (not sure and defer responsibility to someone else)
+    - buy ⏰ (we're looking into this!), defer (hey I'll have to talk to engineering about this), escalation (super valid - let me escalate to our engineering team)
+- give reactions to messages when appropriate (instead of replying with a message) - choices: thumbs up, fire, amen
+- edit option sometimes doesn't work
 
 - if it's a technical question/debugging question which i have to respond to manually.
 
