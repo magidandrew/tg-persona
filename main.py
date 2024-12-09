@@ -8,9 +8,11 @@ import os
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from config import SYSTEM_PROMPT, CHAT_NAME_FILTER, CHAT_TITLE_BLACKLIST, GPT_MODEL, GPT_JSON_SCHEMA
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import aiosqlite
 import json
+from telethon.tl import functions
+from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
 
 load_dotenv()
 
@@ -48,8 +50,10 @@ class MessageMonitor:
     def __init__(self, api_id: str,  api_hash: str, phone: str, bot_token: str, openai_api_key: str):
         self.client = TelegramClient('user_session', api_id, api_hash)
         self.bot = TelegramClient('bot_session', api_id, api_hash)
-        self.delay_time_seconds = 2  # todo: change this to 3 minutes
-        self.delay_check_interval_seconds = 1 # todo: change this to 15 seconds
+        # self.delay_time_seconds = 1 # debug
+        # self.delay_check_interval_seconds = 1 # debug
+        self.delay_time_seconds = 120 
+        self.delay_check_interval_seconds = 15 
         self.max_unique_senders = 2
         self.bot_token = bot_token
         self.phone = phone
@@ -72,6 +76,8 @@ class MessageMonitor:
         self.message_queues = {}      # Store queued messages for each chat
         self.processing_tasks = {}    # Store processing tasks for each chat
         self.delay_tasks = {}  # Store the delay tasks for each chat
+        # asyncio.create_task(self._mute_matching_chats()) # fixme: for now, turned off
+        self._schedule_pending_messages_notifications()
 
     async def start(self):
         """Start the client and message monitoring"""
@@ -200,9 +206,10 @@ class MessageMonitor:
             )
             
             raw_gpt_response = response.choices[0].message.content
+            self.logger.info(f"Raw GPT response: {raw_gpt_response}")
             decoded_gpt_response = json.loads(raw_gpt_response)
             gpt_response = decoded_gpt_response['response']
-            should_respond = True if decoded_gpt_response['should_respond'] == 'true' else False
+            should_respond = True if decoded_gpt_response['should_respond'] else False
         
             if not should_respond:
                 self.logger.info(f"Skipping response for {original_chat_id} because: {decoded_gpt_response['reason']}")
@@ -216,7 +223,9 @@ class MessageMonitor:
                 self.pending_messages[message_id] = {
                     'response': gpt_response,
                     'chat_id': original_chat_id,
-                    'context': message_contexts
+                    'context': message_contexts,
+                    'confidence': decoded_gpt_response['confidence'],
+                    'urgency': decoded_gpt_response['urgency']
                 }
                 
                 # Create inline keyboard
@@ -227,11 +236,19 @@ class MessageMonitor:
                         Button.inline("❌ Reject", f"reject_{message_id}")
                     ]
                 ]
+
+                urgency = decoded_gpt_response['urgency']
+                if urgency == 'high':
+                    urgency_emoji = "🚨"
+                elif urgency == 'medium':
+                    urgency_emoji = "🟠"
+                elif urgency == 'low':
+                    urgency_emoji = "🟢"
                 
-                message = " New message to review:\n\n"
+                message = f"{urgency_emoji} New message to review:\n\n"
                 message += "Context:\n"
                 message += "\n".join(message_contexts)
-                message += "\n\n📤 Proposed Response:\n"
+                message += f"\n\n📤 Proposed Response: confidence <{decoded_gpt_response['confidence']}>\n"
                 message += gpt_response
                 
                 await self.bot.send_message(me.id, message, buttons=buttons)
@@ -384,7 +401,7 @@ class MessageMonitor:
                                 if len(unique_senders) <= self.max_unique_senders:
                                     timestamp = message.date.strftime("%Y-%m-%d %H:%M:%S")
                                     username = f"@{message.sender.username}" if message.sender.username else "no_username"
-                                    formatted_messages.insert(0, f"{username} [{timestamp}]: {message.text}")
+                                    formatted_messages.insert(0, f"sender_username <{username}> [{timestamp}]: {message.text}")
                                 else:
                                     break
 
@@ -409,6 +426,103 @@ class MessageMonitor:
             raise
         except Exception as e:
             self.logger.error(f"Error in delayed processing: {str(e)}")
+
+    async def _mute_matching_chats(self):
+        await asyncio.sleep(5)  # Initial delay to let other initialization complete
+        """Continuously mute all chats matching the CHAT_NAME_FILTER pattern"""
+        try:
+            # Get matching chats once
+            matching_chats = []
+            async for dialog in self.client.iter_dialogs():
+                if dialog.is_group and re.search(CHAT_NAME_FILTER, dialog.title, re.IGNORECASE):
+                    matching_chats.append(dialog)
+                    self.logger.info(f"Found matching chat to mute: {dialog.title}")
+
+            while True:
+                for dialog in matching_chats:
+                    try:
+                        # Create notification settings for muting
+                        settings = InputPeerNotifySettings(
+                            show_previews=False,
+                            silent=True,
+                            mute_until=int((datetime.now() + timedelta(seconds=10)).timestamp()),
+                            sound=None
+                        )
+                        
+                        # Create the peer for the notification update
+                        peer = InputNotifyPeer(
+                            peer=dialog.input_entity
+                        )
+                        
+                        # Update notification settings
+                        await self.client(functions.account.UpdateNotifySettingsRequest(
+                            peer=peer,
+                            settings=settings
+                        ))
+                        
+                        self.logger.info(f"Muted chat: {dialog.title}")
+                    except Exception as e:
+                        self.logger.error(f"Error muting chat {dialog.title}: {str(e)}")
+                
+                # Wait before the next muting cycle
+                await asyncio.sleep(30)  # Increased to 30 seconds
+                
+        except Exception as e:
+            self.logger.error(f"Error in mute job: {str(e)}")
+            # Restart the task if it fails
+            asyncio.create_task(self._mute_matching_chats())
+
+    def _schedule_pending_messages_notifications(self):
+        """Schedule notifications about pending messages at 8am and 8pm"""
+        async def _notification_job():
+            while True:
+                now = datetime.now()
+                # Calculate next 8am and 8pm
+                today_8am = datetime.combine(now.date(), time(8, 0))
+                today_8pm = datetime.combine(now.date(), time(20, 0))
+                
+                if now.time() < time(8, 0):
+                    next_time = today_8am
+                elif now.time() < time(20, 0):
+                    next_time = today_8pm
+                else:
+                    tomorrow = now.date() + timedelta(days=1)
+                    next_time = datetime.combine(tomorrow, time(8, 0))
+                
+                seconds_until_next = (next_time - now).total_seconds()
+                await asyncio.sleep(seconds_until_next)
+                await self._send_pending_messages_summary()
+
+        asyncio.create_task(_notification_job())
+
+    async def _send_pending_messages_summary(self):
+        """Send a summary of pending messages grouped by urgency"""
+        try:
+            me = await self.client.get_me()
+            if not me:
+                return
+
+            # Count messages by urgency
+            urgency_counts = {'high': 0, 'medium': 0, 'low': 0}
+            for msg_data in self.pending_messages.values():
+                urgency = msg_data.get('urgency', 'low')
+                urgency_counts[urgency] += 1
+
+            # Create summary message
+            current_time = datetime.now().strftime('%I:%M %p')
+            summary = f"📊 Pending Messages Summary ({current_time})\n\n"
+            summary += f"🚨 Urgent: {urgency_counts['high']}\n"
+            summary += f"🟠 Medium: {urgency_counts['medium']}\n"
+            summary += f"🟢 Low: {urgency_counts['low']}\n"
+            
+            total = sum(urgency_counts.values())
+            summary += f"\nTotal pending: {total}"
+
+            if total > 0:
+                await self.bot.send_message(me.id, summary)
+            
+        except Exception as e:
+            self.logger.error(f"Error sending pending messages summary: {str(e)}")
 
 async def main():
     monitor = MessageMonitor(
