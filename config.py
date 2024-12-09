@@ -108,6 +108,8 @@ SYSTEM_JSON_SCHEMA_INSTRUCTIONS = """
             - "low": General inquiries or non-time-sensitive matters
 """
 
+TEAMMATES_USERNAME_LIST = ['jketan', 'bennewgen']
+
 class GPT_JSON_SCHEMA(BaseModel):
     should_respond: bool
     reason: str

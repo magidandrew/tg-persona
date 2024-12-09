@@ -6,6 +6,9 @@ should haves:
 - wait for 3 min since last message since they might follow up with additional messages (sometimes up to 6-8) - ✅
     - return more context as back 2-3 people (rather than 2-3 messages) - ✅
     - keep waiting to respond until there are people typing (only respond when the chat cools off for 1 min)
+---
+- automatically find the chats that have been unanswered to (without anyone from our side), and prompt a sample response from our side automatically - NOT DONE
+---
 - ability to mute all groups automatically (a job that runs every 30 min and mutes all for 30 min). this way when you stop running the bot, it unmutes. (how to do batch processing, just mute until needed)
     - [you have 3 urgent, 2 medium, 1 low] messages
 - batch processing system - groups messages by priority and allows me to screen them there and then
