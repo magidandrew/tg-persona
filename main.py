@@ -77,6 +77,7 @@ class MessageMonitor:
         self.processing_tasks = {}    # Store processing tasks for each chat
         self.delay_tasks = {}  # Store the delay tasks for each chat
         # asyncio.create_task(self._mute_matching_chats()) # fixme: for now, turned off
+        self.notification_times = (time(1, 0), time(13, 0)) # in UTC time # 1 AM and 1 PM UTC
         self._schedule_pending_messages_notifications()
 
     async def start(self):
@@ -473,21 +474,20 @@ class MessageMonitor:
             asyncio.create_task(self._mute_matching_chats())
 
     def _schedule_pending_messages_notifications(self):
-        """Schedule notifications about pending messages at 8am and 8pm"""
+        """Schedule notifications about pending messages at specified times"""
         async def _notification_job():
             while True:
                 now = datetime.now()
-                # Calculate next 8am and 8pm
-                today_8am = datetime.combine(now.date(), time(8, 0))
-                today_8pm = datetime.combine(now.date(), time(20, 0))
+                today_times = [datetime.combine(now.date(), t) for t in self.notification_times]
                 
-                if now.time() < time(8, 0):
-                    next_time = today_8am
-                elif now.time() < time(20, 0):
-                    next_time = today_8pm
-                else:
+                next_time = None
+                for t in today_times:
+                    if now < t:
+                        next_time = t
+                        break
+                if not next_time:
                     tomorrow = now.date() + timedelta(days=1)
-                    next_time = datetime.combine(tomorrow, time(8, 0))
+                    next_time = datetime.combine(tomorrow, self.notification_times[0])
                 
                 seconds_until_next = (next_time - now).total_seconds()
                 await asyncio.sleep(seconds_until_next)
