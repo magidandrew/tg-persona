@@ -13,6 +13,7 @@ import aiosqlite
 import json
 from telethon.tl import functions
 from telethon.tl.types import InputPeerNotifySettings, InputNotifyPeer
+import pickle
 
 load_dotenv()
 
@@ -31,8 +32,9 @@ logger.setLevel(logging.INFO)
 
 class MessageMonitor:
     async def _init_db(self):
-        """Initialize SQLite database and create messages table"""
+        """Initialize SQLite database and create necessary tables"""
         async with aiosqlite.connect('telegram_monitor.db') as db:
+            # Existing messages table
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS message_tracking (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,15 +47,67 @@ class MessageMonitor:
                     FOREIGN KEY (chat_id) REFERENCES chats(id)
                 )
             ''')
+            
+            # New pending messages table
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS pending_messages (
+                    message_id TEXT PRIMARY KEY,
+                    chat_id INTEGER,
+                    response TEXT,
+                    context BLOB,  -- Will store pickled context list
+                    confidence INTEGER,
+                    urgency TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            await db.commit()
+
+    async def _save_pending_message(self, message_id: str, message_data: dict):
+        """Save a pending message to the database"""
+        async with aiosqlite.connect('telegram_monitor.db') as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO pending_messages 
+                (message_id, chat_id, response, context, confidence, urgency)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                message_id,
+                message_data['chat_id'],
+                message_data['response'],
+                pickle.dumps(message_data['context']),
+                message_data['confidence'],
+                message_data['urgency']
+            ))
+            await db.commit()
+
+    async def _load_pending_messages(self):
+        """Load all pending messages from the database"""
+        async with aiosqlite.connect('telegram_monitor.db') as db:
+            async with db.execute('SELECT * FROM pending_messages') as cursor:
+                rows = await cursor.fetchall()
+                result = {}
+                for row in rows:
+                    result[row[0]] = {
+                        'chat_id': row[1],
+                        'response': row[2],
+                        'context': pickle.loads(row[3]),
+                        'confidence': row[4],
+                        'urgency': row[5]
+                    }
+                return result
+
+    async def _delete_pending_message(self, message_id: str):
+        """Delete a pending message from the database"""
+        async with aiosqlite.connect('telegram_monitor.db') as db:
+            await db.execute('DELETE FROM pending_messages WHERE message_id = ?', (message_id,))
             await db.commit()
 
     def __init__(self, api_id: str,  api_hash: str, phone: str, bot_token: str, openai_api_key: str):
         self.client = TelegramClient('user_session', api_id, api_hash)
         self.bot = TelegramClient('bot_session', api_id, api_hash)
-        # self.delay_time_seconds = 1 # debug
-        # self.delay_check_interval_seconds = 1 # debug
-        self.delay_time_seconds = 120 
-        self.delay_check_interval_seconds = 15 
+        self.delay_time_seconds = 1 # debug
+        self.delay_check_interval_seconds = 1 # debug
+        # self.delay_time_seconds = 120 
+        # self.delay_check_interval_seconds = 15 
         self.max_unique_senders = 2
         self.bot_token = bot_token
         self.phone = phone
@@ -62,7 +116,7 @@ class MessageMonitor:
         self.tg_username = None
         self.openai_api_key = openai_api_key
         self.openai_client = AsyncOpenAI(api_key=openai_api_key)
-        self.pending_messages = {}  # Store pending messages waiting for approval
+        self.pending_messages = {}  # Will be populated after DB initialization
         self.stats = {
             'group_chat_replies': 0,
             'tagged_messages': 0,
@@ -71,7 +125,7 @@ class MessageMonitor:
             'absinthe_group_messages': 0
         }
         self._schedule_daily_stats_reset()
-        asyncio.create_task(self._init_db())
+        asyncio.create_task(self._init_and_load_db())
         self.last_message_times = {}  # Store last message time for each chat
         self.message_queues = {}      # Store queued messages for each chat
         self.processing_tasks = {}    # Store processing tasks for each chat
@@ -79,6 +133,11 @@ class MessageMonitor:
         # asyncio.create_task(self._mute_matching_chats()) # fixme: for now, turned off
         self.notification_times = (time(1, 0), time(13, 0)) # in UTC time # 1 AM and 1 PM UTC
         self._schedule_pending_messages_notifications()
+
+    async def _init_and_load_db(self):
+        """Initialize database and load pending messages"""
+        await self._init_db()
+        self.pending_messages = await self._load_pending_messages()
 
     async def start(self):
         """Start the client and message monitoring"""
@@ -217,17 +276,20 @@ class MessageMonitor:
             
             # Only proceed if we're sending to the bot owner
             if me and me.id and should_respond: 
-                # Generate a unique ID for this message
-                message_id = f"{original_chat_id}_{len(self.pending_messages)}"
+                message_id = f"{original_chat_id}_{datetime.now().timestamp()}"
                 
-                # Store the pending message
-                self.pending_messages[message_id] = {
+                # Create message data
+                message_data = {
                     'response': gpt_response,
                     'chat_id': original_chat_id,
                     'context': message_contexts,
                     'confidence': decoded_gpt_response['confidence'],
                     'urgency': decoded_gpt_response['urgency']
                 }
+                
+                # Save to database
+                await self._save_pending_message(message_id, message_data)
+                self.pending_messages[message_id] = message_data
                 
                 # Create inline keyboard
                 buttons = [
@@ -315,12 +377,12 @@ class MessageMonitor:
             message_data = self.pending_messages[message_id]
             
             if action == "approve":
-                # Send the approved message
                 await self.client.send_message(
                     message_data['chat_id'],
                     message_data['response']
                 )
                 await event.edit("✅ Message approved and sent!")
+                await self._delete_pending_message(message_id)
                 del self.pending_messages[message_id]
             
             elif action == "edit":
@@ -365,6 +427,7 @@ class MessageMonitor:
             
             else:  # reject
                 await event.edit("❌ Message rejected")
+                await self._delete_pending_message(message_id)
                 del self.pending_messages[message_id]
             
         except Exception as e:
