@@ -104,10 +104,10 @@ class MessageMonitor:
     def __init__(self, api_id: str,  api_hash: str, phone: str, bot_token: str, openai_api_key: str):
         self.client = TelegramClient('user_session', api_id, api_hash)
         self.bot = TelegramClient('bot_session', api_id, api_hash)
-        self.delay_time_seconds = 1 # debug
-        self.delay_check_interval_seconds = 1 # debug
-        # self.delay_time_seconds = 120 
-        # self.delay_check_interval_seconds = 15 
+        # self.delay_time_seconds = 1 # debug
+        # self.delay_check_interval_seconds = 1 # debug
+        self.delay_time_seconds = 120 
+        self.delay_check_interval_seconds = 15 
         self.max_unique_senders = 2
         self.bot_token = bot_token
         self.phone = phone
