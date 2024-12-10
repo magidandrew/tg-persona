@@ -7,6 +7,7 @@ should haves:
     - return more context as back 2-3 people (rather than 2-3 messages) - ✅
     - keep waiting to respond until there are people typing (only respond when the chat cools off for 1 min)
 ---
+- persistent message storing - ✅
 - automatically find the chats that have been unanswered to (without anyone from our side), and prompt a sample response from our side automatically - NOT DONE
 ---
 - ability to mute all groups automatically (a job that runs every 30 min and mutes all for 30 min). this way when you stop running the bot, it unmutes. (how to do batch processing, just mute until needed)
